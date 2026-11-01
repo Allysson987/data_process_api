@@ -1,25 +1,7 @@
-import requests
-import json
-import os
-from dotenv import load_dotenv
-load_dotenv('.env')
-api_key=os.getenv('API_KEY')
-url = "https://api-publica.datajud.cnj.jus.br/api_publica_trf1/_search"
+from fastapi import FastAPI
+from app.api.router import api_router
 
-payload = json.dumps({
-  "query": {
-    "match": {
-      "numeroProcesso": "00008323520184013202"
-    }
-  }
-})
+app = FastAPI()
 
-#Substituir <API Key> pela Chave Pública
-headers = {
-  'Authorization': rf'ApiKey {api_key}',
-  'Content-Type': 'application/json'
-}
-
-response = requests.request("POST", url, headers=headers, data=payload)
-
-print(response.text)
+# Insere a rota com o prefixo global /api/v1
+app.include_router(api_router, prefix="/api/v1")
