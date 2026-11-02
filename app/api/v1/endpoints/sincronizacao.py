@@ -1,5 +1,5 @@
 from fastapi import APIRouter, HTTPException
-from app.services.court_classifier import CourtClassifier
+from app.core.court_classifier import CourtClassifier
 
 # Cria o roteador específico para este arquivo
 router = APIRouter()
