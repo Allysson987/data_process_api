@@ -5,7 +5,7 @@ ROOT_DIR = str(Path(__file__).resolve().parent.parent.parent)
 if ROOT_DIR not in sys.path:
     sys.path.insert(0, ROOT_DIR)
 
-from app.services.court_classifier import CourtClassifier  # Ou ajuste o caminho de onde você salvou
+from app.core.court_classifier import CourtClassifier  # Ou ajuste o caminho de onde você salvou
 
 def test_court_classifier_valid():
     classifier = CourtClassifier()
@@ -18,9 +18,9 @@ def test_court_classifier_valid():
     
     # Valida se retornou um dicionário com as chaves corretas
     assert isinstance(resultado, dict)
-    assert "segment" in resultado
-    assert "state" in resultado
-    assert resultado["state"] == "SP"
+    assert "segment_name" in resultado
+    assert "state_name" in resultado
+    assert resultado["state_name"] == "SP"
 
 def test_court_classifier_invalid_length():
     classifier = CourtClassifier()
