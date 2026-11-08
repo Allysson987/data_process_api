@@ -1,7 +1,14 @@
 
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import (
+    APIRouter,
+    Cookie,
+    Depends,
+    HTTPException,
+    Response,
+    status,
+)
 from sqlalchemy.orm import Session
 
 from app.database.connection import get_db
@@ -13,6 +20,7 @@ from app.core.security import (
     hash_password,
     verify_password,
     create_access_token,
+    decode_access_token,
 )
 
 from app.models.user import User
@@ -25,13 +33,19 @@ from app.schemas.auth import (
     UserUpdate,
     PasswordUpdate,
     UserResponse,
-    TokenResponse,
 )
 
 from app.use_cases.rate_limit import rate_limit
 
 
 router = APIRouter(prefix="/auth", tags=["Autenticação"])
+
+
+# Configuração do cookie de autenticação
+COOKIE_NAME = "access_token"
+COOKIE_SECURE = True
+COOKIE_SAMESITE = "lax"
+COOKIE_PATH = "/"
 
 
 @router.post(
@@ -52,7 +66,7 @@ def register(
 
     if existing_user:
         raise HTTPException(
-            status_code=409,
+            status_code=status.HTTP_409_CONFLICT,
             detail="E-mail já cadastrado.",
         )
 
@@ -74,11 +88,11 @@ def register(
 
 @router.post(
     "/login",
-    response_model=TokenResponse,
     dependencies=[Depends(rate_limit(5, 60, "ip"))],
 )
 def login(
     data: UserLogin,
+    response: Response,
     db: Session = Depends(get_db),
 ):
     user = db.query(User).filter(
@@ -91,20 +105,73 @@ def login(
         or not user.is_active
     ):
         raise HTTPException(
-            status_code=401,
+            status_code=status.HTTP_401_UNAUTHORIZED,
             detail="E-mail ou senha inválidos.",
         )
 
     token, _, expires_at = create_access_token(str(user.id))
 
-    expires_in = int(
-        (expires_at - datetime.now(timezone.utc)).total_seconds()
+    expires_in = max(
+        int(
+            (expires_at - datetime.now(timezone.utc)).total_seconds()
+        ),
+        1,
+    )
+
+    response.set_cookie(
+        key=COOKIE_NAME,
+        value=token,
+        httponly=True,
+        secure=COOKIE_SECURE,
+        samesite=COOKIE_SAMESITE,
+        max_age=expires_in,
+        path=COOKIE_PATH,
     )
 
     return {
-        "access_token": token,
-        "token_type": "bearer",
+        "message": "Autenticado com sucesso.",
         "expires_in": expires_in,
+    }
+
+
+@router.post("/logout")
+def logout(
+    response: Response,
+    access_token: str | None = Cookie(default=None, alias=COOKIE_NAME),
+    current_user: User = Depends(get_current_user),
+):
+    if access_token:
+        try:
+            payload = decode_access_token(access_token)
+
+            jti = payload["jti"]
+            exp = int(payload["exp"])
+
+            now = int(datetime.now(timezone.utc).timestamp())
+            ttl = max(exp - now, 1)
+
+            redis_client.setex(
+                f"revoked_token:{jti}",
+                ttl,
+                "1",
+            )
+
+        except Exception:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Não foi possível revogar o token.",
+            )
+
+    response.delete_cookie(
+        key=COOKIE_NAME,
+        path=COOKIE_PATH,
+        httponly=True,
+        secure=COOKIE_SECURE,
+        samesite=COOKIE_SAMESITE,
+    )
+
+    return {
+        "message": "Logout realizado com sucesso."
     }
 
 
@@ -134,7 +201,7 @@ def update_me(
 
         if existing:
             raise HTTPException(
-                status_code=409,
+                status_code=status.HTTP_409_CONFLICT,
                 detail="Este e-mail já está cadastrado.",
             )
 
@@ -158,13 +225,13 @@ def update_password(
         current_user.password_hash,
     ):
         raise HTTPException(
-            status_code=400,
+            status_code=status.HTTP_400_BAD_REQUEST,
             detail="Senha atual incorreta.",
         )
 
     if data.current_password == data.new_password:
         raise HTTPException(
-            status_code=400,
+            status_code=status.HTTP_400_BAD_REQUEST,
             detail="A nova senha deve ser diferente da atual.",
         )
 
@@ -172,44 +239,9 @@ def update_password(
 
     db.commit()
 
-    return {"message": "Senha atualizada com sucesso."}
-
-from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-
-token_scheme = HTTPBearer()
-
-
-@router.post("/logout")
-def logout(
-    credentials: HTTPAuthorizationCredentials = Depends(token_scheme),
-    current_user: User = Depends(get_current_user),
-):
-    from app.core.security import decode_access_token
-
-    from fastapi import HTTPException
-
-    try:
-        payload = decode_access_token(credentials.credentials)
-
-        jti = payload["jti"]
-        exp = int(payload["exp"])
-
-        now = int(datetime.now(timezone.utc).timestamp())
-        ttl = max(exp - now, 1)
-
-        redis_client.setex(
-            f"revoked_token:{jti}",
-            ttl,
-            "1",
-        )
-
-    except Exception:
-        raise HTTPException(
-            status_code=401,
-            detail="Não foi possível revogar o token.",
-        )
-
-    return {"message": "Logout realizado com sucesso."}
+    return {
+        "message": "Senha atualizada com sucesso."
+    }
 
 
 @router.get("/me/access-history")
