@@ -1,7 +1,7 @@
 
 import logging
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Depends
 
 from app.controllers.controller_execution import (
     ControllerExecutionDataJud
@@ -15,6 +15,10 @@ from app.models.models_diary import Diary
 from app.use_cases.diary_cache_service import (
     DiaryCacheService
 )
+
+from app.core.dependencies import get_current_user
+from app.models.user import User
+from app.use_cases.rate_limit import rate_limit
 
 
 logger = logging.getLogger(__name__)
@@ -52,7 +56,13 @@ def serialize_diary(diary: Diary) -> dict:
     }
 
 
-@router.get("/diary/{uf}")
+@router.get(
+    "/diary/{uf}",
+    dependencies=[
+        Depends(get_current_user),
+        Depends(rate_limit(30, 60, "user"))
+    ]
+)
 def get_diary_info(
     uf: str,
     limit: int = Query(default=10, ge=1, le=100)
@@ -66,21 +76,18 @@ def get_diary_info(
             detail="UF inválida."
         )
 
-    # 1. Tenta buscar no Redis
     cached_data = cache_service.get(
         uf,
         limit
     )
 
     if cached_data is not None:
-
         return {
             "status": "sucesso",
             "source": "redis",
             "info": cached_data
         }
 
-    # 2. Cache miss: consulta o Neon
     db = SessionLocal()
 
     try:
@@ -102,7 +109,6 @@ def get_diary_info(
             for diary in diaries
         ]
 
-        # 3. Atualiza o cache
         cache_service.set(
             uf,
             limit,
@@ -131,7 +137,13 @@ def get_diary_info(
         db.close()
 
 
-@router.get("/diary/{uf}/status")
+@router.get(
+    "/diary/{uf}/status",
+    dependencies=[
+        Depends(get_current_user),
+        Depends(rate_limit(60, 60, "user"))
+    ]
+)
 def get_diary_status(uf: str):
 
     uf = uf.strip().upper()
@@ -181,7 +193,13 @@ def get_diary_status(uf: str):
         ) from error
 
 
-@router.get("/consult_case/{number_case}")
+@router.get(
+    "/consult_case/{number_case}",
+    dependencies=[
+        Depends(get_current_user),
+        Depends(rate_limit(10, 60, "user"))
+    ]
+)
 def get_process_info(number_case: str):
 
     try:
