@@ -6,10 +6,10 @@ ROOT_DIR = str(Path(__file__).resolve().parent.parent.parent)
 if ROOT_DIR not in sys.path:
     sys.path.insert(0, ROOT_DIR)
 
-from app.services.datajud_service import DataJudService
+from app.use_cases.datajud_service import DataJudService
 
-@patch("app.services.datajud_service.requests.post")
-@patch("app.services.datajud_service.CourtClassifier")  # Isola o classificador para o teste do serviço focar na API
+@patch("app.use_cases.datajud_service.requests.post")
+@patch("app.use_cases.datajud_service.CourtClassifier")  # Isola o classificador para o teste do serviço focar na API
 def test_datajud_service_get_process_info(mock_classifier_class, mock_post):
     # 1. Simula o retorno do CourtClassifier baseando-se nas chaves que você definiu (`state_name`)
     mock_classifier_instance = mock_classifier_class.return_value
