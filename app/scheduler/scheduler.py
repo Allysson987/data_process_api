@@ -4,20 +4,15 @@ import logging
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
-from apscheduler.schedulers.blocking import BlockingScheduler
+from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.interval import IntervalTrigger
 
 from app.core.config import settings
-from app.scheduler.diary_jobs import DiarySyncJob
-
-
-logging.basicConfig(
-    level=logging.INFO,
-    format=(
-        "%(asctime)s | %(levelname)s | "
-        "%(name)s | %(message)s"
-    )
+from app.scheduler.diary_jobs import (
+    DiarySyncJob,
+    DiaryNationalSyncJob
 )
+
 
 logger = logging.getLogger(__name__)
 
@@ -34,38 +29,57 @@ def get_ufs() -> list[str]:
     ]
 
 
-def main():
+def create_scheduler() -> BackgroundScheduler:
 
     ufs = get_ufs()
-
-    if not ufs:
-        raise RuntimeError(
-            "Nenhuma UF configurada em DIARY_UFS."
-        )
 
     logger.info(
         "UFs configuradas: %s",
         ufs
     )
 
-    diary_job = DiarySyncJob(ufs)
-
-    scheduler = BlockingScheduler(
+    scheduler = BackgroundScheduler(
         timezone=TIMEZONE
     )
 
+    # Coleta estadual
+    if ufs:
+
+        diary_job = DiarySyncJob(ufs)
+
+        scheduler.add_job(
+            func=diary_job.execute,
+            trigger=IntervalTrigger(
+                minutes=INTERVAL_MINUTES,
+                start_date=(
+                    datetime.now(TIMEZONE)
+                    + timedelta(seconds=15)
+                ),
+                timezone=TIMEZONE
+            ),
+            id="daily_diary_sync",
+            name="Sincronização diária estadual",
+            max_instances=1,
+            coalesce=True,
+            misfire_grace_time=3600,
+            replace_existing=True
+        )
+
+    # Coleta nacional
+    national_job = DiaryNationalSyncJob()
+
     scheduler.add_job(
-        func=diary_job.execute,
+        func=national_job.execute,
         trigger=IntervalTrigger(
             minutes=INTERVAL_MINUTES,
             start_date=(
                 datetime.now(TIMEZONE)
-                + timedelta(seconds=15)
+                + timedelta(minutes=5)
             ),
             timezone=TIMEZONE
         ),
-        id="daily_diary_sync",
-        name="Sincronização diária dos diários",
+        id="daily_national_diary_sync",
+        name="Sincronização diária nacional",
         max_instances=1,
         coalesce=True,
         misfire_grace_time=3600,
@@ -73,19 +87,8 @@ def main():
     )
 
     logger.info(
-        "Scheduler iniciado. Intervalo: %s minutos.",
+        "Jobs registrados. Intervalo: %s minutos.",
         INTERVAL_MINUTES
     )
 
-    try:
-        scheduler.start()
-
-    except (KeyboardInterrupt, SystemExit):
-
-        logger.info("Encerrando scheduler...")
-
-        scheduler.shutdown(wait=True)
-
-
-if __name__ == "__main__":
-    main()
+    return scheduler

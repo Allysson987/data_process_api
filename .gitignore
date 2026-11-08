@@ -78,7 +78,9 @@ target/
 
 # Jupyter Notebook
 .ipynb_checkpoints
-
+outputs
+*.pdf
+*scripts
 # IPython
 profile_default/
 ipython_config.py

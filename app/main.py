@@ -1,10 +1,38 @@
 
 import os
+import logging
+
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.router import api_router
+from app.scheduler.scheduler import create_scheduler
+
+
+logger = logging.getLogger(__name__)
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+
+    scheduler = create_scheduler()
+    scheduler.start()
+
+    app.state.scheduler = scheduler
+
+    logger.info("Scheduler iniciado junto com a API.")
+
+    try:
+        yield
+
+    finally:
+        logger.info("Encerrando scheduler...")
+
+        scheduler.shutdown(wait=True)
+
+        logger.info("Scheduler encerrado.")
 
 
 app = FastAPI(
@@ -22,13 +50,13 @@ app = FastAPI(
     docs_url="/docs",
     redoc_url="/redoc",
     openapi_url="/openapi.json",
+    lifespan=lifespan,
 )
 
 
 # Origens autorizadas a consumir a API
 origins = [
     "http://localhost:3000",
-   
 ]
 
 # CORS
