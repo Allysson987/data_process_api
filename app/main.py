@@ -57,6 +57,7 @@ app = FastAPI(
 # Origens autorizadas a consumir a API
 origins = [
     "http://localhost:3000",
+    "https://front-data-process-api.onrender.com"
 ]
 
 # CORS
