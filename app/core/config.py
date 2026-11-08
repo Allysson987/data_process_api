@@ -10,6 +10,8 @@ class Settings(BaseSettings):
     ENVIRONMENT: str = "development"  # Se não estiver no .env, a API falha ao iniciar!
     DATA_JUD_SECRET_KEY: str
     
+    DATABASE_URL: str
+
     # Configuração para ler o arquivo .env na raiz
     model_config = SettingsConfigDict(
         env_file=".env",
