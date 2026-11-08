@@ -41,3 +41,8 @@ class RulesDiary:
             )
 
         return provider
+    def get_available_states(self) -> list[str]:
+        return sorted(
+            uf.upper()
+            for uf in self.providers.keys()
+        )
