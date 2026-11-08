@@ -9,7 +9,11 @@ from app.utils.diary_rules import RulesDiary
 from app.database.connection import SessionLocal
 from app.database.redis_connection import redis_client
 from app.repositories.diary_repository import DiaryRepository
+from datetime import date, datetime, timezone
 
+from app.use_cases.diary_office.office_diary_nation import (
+    ComunicaPjeService,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -46,7 +50,62 @@ class ControllerExecutionDataJud:
         return self.data_jud_service.get_process_info(
             number_case
         )
+    @staticmethod
+    def _map_comunica_pje(
+        communication: dict,
+        tribunal: str
+    ) -> dict:
 
+        communication_id = communication.get("id")
+
+        if communication_id is None:
+            raise ValueError(
+                "Comunicação retornada sem identificador."
+            )
+
+        available_date = (
+            communication.get("data_disponibilizacao")
+            or communication.get("datadisponibilizacao")
+        )
+
+        if not available_date:
+            raise ValueError(
+                f"Comunicação {communication_id} sem data de disponibilização."
+            )
+
+        publication_date = date.fromisoformat(
+            str(available_date)[:10]
+        )
+
+        communication_type = (
+            communication.get("tipoComunicacao")
+            or communication.get("nomeClasse")
+            or "Comunicação processual"
+        )
+
+        organ = communication.get("nomeOrgao")
+
+        title = (
+            f"{communication_type} - {organ}"
+            if organ
+            else communication_type
+        )
+
+        return {
+            "source": (
+                communication.get("siglaTribunal")
+                or tribunal
+            ),
+            "source_id": str(communication_id),
+            "publication_date": publication_date,
+            "available_date": publication_date,
+            "update_date": datetime.now(
+                timezone.utc
+            ).replace(tzinfo=None),
+            "title": title[:255],
+            "content": communication.get("texto") or "",
+            "pdf_url": "https://comunica.pje.jus.br/"
+        }
     def consult_diary_rules(self, uf: str):
 
         if redis_client is None:

@@ -36,3 +36,18 @@ class DiaryRepository:
         self.db.refresh(diary)
 
         return diary
+    def exists(
+        self,
+        source: str,
+        source_id: str
+    ) -> bool:
+
+        return (
+            self.db.query(Diary.id)
+            .filter(
+                Diary.source == source,
+                Diary.source_id == source_id
+            )
+            .first()
+            is not None
+        )

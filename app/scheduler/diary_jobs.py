@@ -30,7 +30,7 @@ class DiarySyncJob:
     def execute(self):
 
         logger.info(
-            "Iniciando ciclo de sincronização: %s",
+            "Iniciando ciclo de sincronização estadual: %s",
             self.ufs
         )
 
@@ -89,7 +89,68 @@ class DiarySyncJob:
                 })
 
         logger.info(
-            "Ciclo de sincronização finalizado."
+            "Ciclo de sincronização estadual finalizado."
         )
 
         return results
+
+
+class DiaryNationalSyncJob:
+
+    def __init__(self):
+
+        self.controller = ControllerExecutionDataJud()
+        self.cache_service = DiaryCacheService()
+
+    def execute(self):
+
+        logger.info(
+            "Iniciando sincronização nacional do Comunica PJe."
+        )
+
+        try:
+
+            result = self.controller.consult_comunica_pje()
+
+            states = result.get("states", {})
+
+            for uf, state_result in states.items():
+
+                if (
+                    state_result.get("status") == "completed"
+                    and state_result.get("saved_count", 0) > 0
+                ):
+
+                    self.cache_service.invalidate(uf)
+
+            logger.info(
+                "Sincronização nacional concluída. "
+                "Salvos: %s | Duplicados: %s",
+                result.get("total_saved", 0),
+                result.get("total_duplicates", 0)
+            )
+
+            return result
+
+        except ExecutionAlreadyRunningError as error:
+
+            logger.warning(
+                "Coleta nacional já está em execução: %s",
+                error
+            )
+
+            return {
+                "status": "already_running",
+                "error": str(error)
+            }
+
+        except Exception as error:
+
+            logger.exception(
+                "Falha na sincronização nacional."
+            )
+
+            return {
+                "status": "failed",
+                "error": str(error)
+            }
