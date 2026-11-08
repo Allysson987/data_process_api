@@ -1,5 +1,11 @@
+
+import os
+
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+
 from app.api.router import api_router
+
 
 app = FastAPI(
     title="Data Process API",
@@ -18,4 +24,25 @@ app = FastAPI(
     openapi_url="/openapi.json",
 )
 
-app.include_router(api_router, prefix="/api")
+
+# Origens autorizadas a consumir a API
+origins = [
+    "http://localhost:3000",
+   
+]
+
+# CORS
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=origins,
+    allow_credentials=True,
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type"],
+)
+
+
+# Rotas da aplicação
+app.include_router(
+    api_router,
+    prefix="/api",
+)
