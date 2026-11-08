@@ -1,24 +1,30 @@
 from fastapi import APIRouter, HTTPException
-from app.core.court_classifier import CourtClassifier
+from app.controllers.controller_execution import ControllerExecutionDataJud
 
 # Cria o roteador específico para este arquivo
 router = APIRouter()
 
 # Instancia o classificador que criamos antes
-classifier = CourtClassifier()
-
-@router.get("/{numero_processo}")
-def get_process_info(numero_processo: str):
+consult = ControllerExecutionDataJud()
+@router.get('/diary/{uf}')
+def get_diary_info(uf: str):
+    result = consult.consult_diary_rules(uf)
+    return {
+            'status': 'sucesso',
+            'info': result
+    }
+@router.get("/consult_case/{number_case}")
+def get_process_info(number_case: str):
     """
     Endpoint para analisar o número do processo judicial.
     """
     try:
         # Chama a função/classe que faz o trabalho pesado
-        resultado = classifier.classify(numero_processo)
-        
+        result = consult.consult_diary_rules(number_case=number_case)
+
         return {
             "status": "sucesso",
-            "info": resultado
+            "info": result
         }
         
     except ValueError as e:

@@ -32,9 +32,11 @@ class CourtClassifier:
         # Mapeamento do estado
         state_name = self.state_mapping.state_mapping(court_code)
 
+       
         return {
-            "segment": segment_name,
-            "state": state_name
+            "number_process":number_process,
+            "segment_name": segment_name,
+            "state_name": state_name
         }
 
     def clear_process(self, number_process: str) -> str:
