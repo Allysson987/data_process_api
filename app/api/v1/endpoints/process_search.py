@@ -6,7 +6,7 @@ from fastapi import APIRouter, HTTPException, Query, Depends, Path
 from app.controllers.controller_execution import (
     ControllerExecutionDataJud
 )
-
+from app.utils.diary_rules import RulesDiary
 from app.database.connection import SessionLocal
 from app.database.redis_connection import redis_client
 
@@ -27,7 +27,7 @@ router = APIRouter()
 
 consult = ControllerExecutionDataJud()
 cache_service = DiaryCacheService()
-
+diary_rules = RulesDiary()
 
 def serialize_diary(diary: Diary) -> dict:
     return {
@@ -54,7 +54,46 @@ def serialize_diary(diary: Diary) -> dict:
         "pdf_url": diary.pdf_url
     }
 
+@router.get(
+    "/diary/states",
+    tags=["Diários Oficiais"],
+    summary="Listar estados disponíveis para consulta",
+    description="""
+    Retorna as Unidades Federativas que possuem providers
+    cadastrados para consulta de diários oficiais.
 
+    A lista é obtida diretamente do RulesDiary.
+    """,
+    response_description="Lista de estados disponíveis.",
+    dependencies=[
+        Depends(get_current_user),
+        Depends(rate_limit(60, 60, "user"))
+    ]
+)
+def get_available_diary_states():
+    try:
+        states = diary_rules.get_available_states()
+
+        return {
+            "status": "sucesso",
+            "info": [
+                {
+                    "uf": uf,
+                    "source": f"TJ{uf}"
+                }
+                for uf in states
+            ]
+        }
+
+    except Exception as error:
+        logger.exception(
+            "Falha ao listar estados disponíveis para diários."
+        )
+
+        raise HTTPException(
+            status_code=500,
+            detail="Erro ao consultar estados disponíveis."
+        ) from error
 @router.get(
     "/diary/{uf}",
     tags=["Diários Oficiais"],

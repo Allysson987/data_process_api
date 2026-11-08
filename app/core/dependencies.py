@@ -3,8 +3,7 @@ from uuid import UUID
 
 import jwt
 
-from fastapi import Depends, HTTPException, status
-from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from fastapi import Cookie, Depends, HTTPException, status
 from redis.exceptions import RedisError
 from sqlalchemy.orm import Session
 
@@ -14,27 +13,27 @@ from app.core.security import decode_access_token
 from app.models.user import User
 
 
-bearer_scheme = HTTPBearer(auto_error=False)
+COOKIE_NAME = "access_token"
 
 
 def get_current_user(
-    credentials: HTTPAuthorizationCredentials | None = Depends(bearer_scheme),
+    access_token: str | None = Cookie(
+        default=None,
+        alias=COOKIE_NAME,
+    ),
     db: Session = Depends(get_db),
 ) -> User:
 
-    # 1. Validar presença do token
-    if credentials is None:
+    # 1. Validar presença do cookie
+    if not access_token:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Autenticação necessária.",
-            headers={"WWW-Authenticate": "Bearer"},
+            detail="Autenticação necessária. Faça login novamente.",
         )
-
-    token = credentials.credentials
 
     # 2. Validar assinatura e conteúdo do JWT
     try:
-        payload = decode_access_token(token)
+        payload = decode_access_token(access_token)
 
         user_id = payload.get("sub")
         jti = payload.get("jti")
@@ -51,16 +50,22 @@ def get_current_user(
 
         user_uuid = UUID(user_id)
 
-    except (jwt.InvalidTokenError, ValueError, TypeError, AttributeError):
+    except (
+        jwt.InvalidTokenError,
+        ValueError,
+        TypeError,
+        AttributeError,
+    ):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Token inválido ou expirado.",
-            headers={"WWW-Authenticate": "Bearer"},
         )
 
     # 3. Verificar revogação no Redis
     try:
-        is_revoked = redis_client.exists(f"revoked_token:{jti}")
+        is_revoked = redis_client.exists(
+            f"revoked_token:{jti}"
+        )
 
     except RedisError:
         raise HTTPException(
@@ -72,20 +77,22 @@ def get_current_user(
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Sessão revogada. Faça login novamente.",
-            headers={"WWW-Authenticate": "Bearer"},
         )
 
     # 4. Consultar usuário no banco
-    user = db.query(User).filter(
-        User.id == user_uuid,
-        User.is_active.is_(True),
-    ).first()
+    user = (
+        db.query(User)
+        .filter(
+            User.id == user_uuid,
+            User.is_active.is_(True),
+        )
+        .first()
+    )
 
     if not user:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Usuário não encontrado ou inativo.",
-            headers={"WWW-Authenticate": "Bearer"},
         )
 
     return user
