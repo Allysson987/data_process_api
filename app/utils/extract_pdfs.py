@@ -24,40 +24,46 @@ class ExtractPdf:
         try:
             with self.open_pdf(pdf_bytes) as pdf:
 
-                pages: int = self.total_pages(pdf)
+                pages = pdf.pages
+                total = len(pages)
 
                 print(
-                    f'[TJ{uf}] Total de páginas: {pages}',
+                    f'[TJ{uf}] Total de páginas: {total}',
                     flush=True
                 )
 
-                for index, page in enumerate(pdf.pages, start=1):
+                for index, page in enumerate(pages, start=1):
 
-                    print(
-                        f'[TJ{uf}] Extraindo página {index}/{pages}',
-                        flush=True
-                    )
+                    try:
+                        print(
+                            f'[TJ{uf}] Extraindo página {index}/{total}',
+                            flush=True
+                        )
 
-                    text: str | None = page.extract_text()
+                        text = page.extract_text()
 
-                    if text:
-                        buffer.write(text)
-                        buffer.write('\n')
+                        if text:
+                            buffer.write(text)
+                            buffer.write('\n')
 
-                    del text
+                    finally:
+                        # Libera layout e objetos internos da página
+                        page.close()
+
+                        del page
 
                     if index % 20 == 0:
                         gc.collect()
 
-            content: str = buffer.getvalue()
+                content = buffer.getvalue()
 
-            print(
-                f'[TJ{uf}] Extração concluída: '
-                f'{len(content)} caracteres',
-                flush=True
-            )
+                print(
+                    f'[TJ{uf}] Extração concluída: '
+                    f'{len(content)} caracteres',
+                    flush=True
+                )
 
-            return content
+                return content
 
         finally:
             buffer.close()
