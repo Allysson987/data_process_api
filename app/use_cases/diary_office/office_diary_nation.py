@@ -1,6 +1,8 @@
 
 from collections.abc import Iterator
+from datetime import date
 from typing import Any
+from urllib.parse import quote
 
 import requests
 
@@ -10,15 +12,14 @@ class ComunicaPjeService:
     Cliente da API pública Comunica PJe / DJEN do CNJ.
 
     Documentação:
-        https://hcomunicaapi.cnj.jus.br/swagger/index.html
+        https://comunicaapi.pje.jus.br/swagger/index.html
 
-    API de produção:
+    API:
         https://comunicaapi.pje.jus.br/api/v1
     """
 
     BASE_URL = "https://comunicaapi.pje.jus.br/api/v1"
 
-    # Tribunais de Justiça estaduais e Distrito Federal.
     STATE_COURTS = {
         "AC": "TJAC",
         "AL": "TJAL",
@@ -49,9 +50,10 @@ class ComunicaPjeService:
         "TO": "TJTO",
     }
 
+    VALID_MEDIA = {"D", "E"}
+
     def __init__(self, timeout: int = 30):
         self.timeout = timeout
-
         self.session = requests.Session()
 
         self.session.headers.update({
@@ -64,15 +66,7 @@ class ComunicaPjeService:
         endpoint: str,
         params: dict | None = None,
     ) -> Any:
-        """
-        Executa uma requisição GET na API.
-
-        Retorna o JSON original, sem presumir que a resposta
-        será necessariamente um dicionário.
-
-        Isso é importante porque /comunicacao/tribunal
-        pode retornar uma estrutura diferente de /comunicacao.
-        """
+        """Executa GET e retorna a resposta JSON."""
 
         url = f"{self.BASE_URL}/{endpoint.lstrip('/')}"
 
@@ -96,25 +90,15 @@ class ComunicaPjeService:
 
     def get_tribunals(self) -> Any:
         """
-        Retorna os tribunais cadastrados na API.
+        Consulta os tribunais cadastrados na API.
 
-        Endpoint:
-            GET /comunicacao/tribunal
-
-        A resposta é mantida em seu formato original,
-        pois não se deve presumir que seja um dict.
+        GET /comunicacao/tribunal
         """
 
         return self._get("comunicacao/tribunal")
 
     def get_state_courts(self) -> dict[str, str]:
-        """
-        Retorna o mapeamento dos TJs estaduais e do TJDFT.
-
-        Essa lista representa os tribunais conhecidos.
-        Não significa que todos estejam necessariamente
-        cadastrados ou ativos na API.
-        """
+        """Retorna o mapeamento dos tribunais por UF."""
 
         return self.STATE_COURTS.copy()
 
@@ -123,27 +107,28 @@ class ComunicaPjeService:
         response: Any,
     ) -> list[str]:
         """
-        Extrai siglas de tribunais de uma resposta JSON.
+        Extrai somente siglas encontradas em campos conhecidos.
 
-        Aceita estruturas aninhadas em listas e dicionários.
+        Não considera textos genéricos do JSON como siglas.
         """
 
         siglas = set()
+        known_courts = set(self.STATE_COURTS.values())
 
-        def search(data: Any):
+        def search(data: Any) -> None:
 
             if isinstance(data, dict):
 
-                sigla = (
-                    data.get("siglaTribunal")
-                    or data.get("sigla")
-                )
+                for key in ("siglaTribunal", "sigla"):
+                    value = data.get(key)
 
-                if isinstance(sigla, str):
-                    siglas.add(sigla.upper().strip())
+                    if isinstance(value, str):
+                        normalized = value.strip().upper()
+
+                        if normalized in known_courts:
+                            siglas.add(normalized)
 
                 for value in data.values():
-
                     if isinstance(value, (dict, list)):
                         search(value)
 
@@ -152,26 +137,12 @@ class ComunicaPjeService:
                 for item in data:
                     search(item)
 
-            elif isinstance(data, str):
-
-                siglas.add(data.upper().strip())
-
         search(response)
 
-        # Considera apenas os tribunais conhecidos no mapeamento.
-        known_courts = set(self.STATE_COURTS.values())
-
-        return sorted(
-            sigla
-            for sigla in siglas
-            if sigla in known_courts
-        )
+        return sorted(siglas)
 
     def get_available_state_courts(self) -> list[str]:
-        """
-        Retorna os tribunais estaduais identificados
-        na listagem disponibilizada pela API.
-        """
+        """Retorna os tribunais identificados na API."""
 
         response = self.get_tribunals()
 
@@ -196,8 +167,7 @@ class ComunicaPjeService:
         """
         Consulta comunicações processuais.
 
-        Datas:
-            YYYY-MM-DD
+        GET /comunicacao
 
         Meio:
             D = Diário de Justiça Eletrônico Nacional
@@ -205,14 +175,13 @@ class ComunicaPjeService:
         """
 
         if page < 1:
-            raise ValueError(
-                "A página deve ser maior ou igual a 1."
-            )
+            raise ValueError("A página deve ser maior ou igual a 1.")
 
         if items_per_page < 1:
-            raise ValueError(
-                "items_per_page deve ser maior que zero."
-            )
+            raise ValueError("items_per_page deve ser maior que zero.")
+
+        if medium and medium.upper() not in self.VALID_MEDIA:
+            raise ValueError("Meio inválido. Utilize D ou E.")
 
         params = {
             "siglaTribunal": tribunal.upper() if tribunal else None,
@@ -255,13 +224,6 @@ class ComunicaPjeService:
     ) -> Iterator[dict[str, Any]]:
         """
         Percorre as páginas e entrega uma comunicação por vez.
-
-        max_pages:
-            Limita a quantidade de páginas consultadas.
-
-        Sem max_pages:
-            Continua até encontrar uma página vazia
-            ou uma página com menos itens que o limite.
         """
 
         page = 1
@@ -274,7 +236,13 @@ class ComunicaPjeService:
                 **filters,
             )
 
-            items = response.get("items", [])
+            items = response.get("items")
+
+            if items is None:
+                raise ValueError(
+                    "A resposta da API não contém o campo 'items'. "
+                    f"Campos recebidos: {list(response.keys())}"
+                )
 
             if not isinstance(items, list):
                 raise ValueError(
@@ -298,9 +266,7 @@ class ComunicaPjeService:
         date_start: str | None = None,
         date_end: str | None = None,
     ) -> Iterator[dict[str, Any]]:
-        """
-        Atalho para buscar comunicações de um processo.
-        """
+        """Busca comunicações de um processo."""
 
         normalized_number = "".join(
             char
@@ -309,9 +275,7 @@ class ComunicaPjeService:
         )
 
         if not normalized_number:
-            raise ValueError(
-                "Número de processo inválido."
-            )
+            raise ValueError("Número de processo inválido.")
 
         return self.iter_communications(
             tribunal=tribunal,
@@ -320,10 +284,82 @@ class ComunicaPjeService:
             date_end=date_end,
         )
 
+    def download_caderno(
+        self,
+        tribunal: str,
+        publication_date: str,
+        medium: str = "D",
+    ) -> bytes:
+        """
+        Consulta e baixa o caderno de um tribunal.
+
+        GET /caderno/{sigla_tribunal}/{data}/{meio}
+
+        Args:
+            tribunal:
+                Sigla do tribunal, exemplo TJPE.
+
+            publication_date:
+                Data no formato YYYY-MM-DD.
+
+            medium:
+                D = Diário de Justiça Eletrônico Nacional.
+                E = Plataforma Nacional de Editais.
+
+        Returns:
+            Conteúdo binário retornado pelo endpoint.
+        """
+
+        tribunal = tribunal.strip().upper()
+        medium = medium.strip().upper()
+
+        if not tribunal:
+            raise ValueError("A sigla do tribunal é obrigatória.")
+
+        if medium not in self.VALID_MEDIA:
+            raise ValueError("Meio inválido. Utilize D ou E.")
+
+        try:
+            date.fromisoformat(publication_date)
+        except ValueError as error:
+            raise ValueError(
+                "Data inválida. Utilize o formato YYYY-MM-DD."
+            ) from error
+
+        endpoint = (
+            f"caderno/{quote(tribunal, safe='')}/"
+            f"{quote(publication_date, safe='')}/"
+            f"{quote(medium, safe='')}"
+        )
+
+        url = f"{self.BASE_URL}/{endpoint}"
+
+        response = self.session.get(
+            url,
+            timeout=self.timeout,
+            headers={"Accept": "application/pdf, application/octet-stream"},
+        )
+
+        response.raise_for_status()
+
+        if not response.content:
+            raise ValueError(
+                f"O caderno do tribunal {tribunal} "
+                f"não possui conteúdo para {publication_date}."
+            )
+
+        content_type = response.headers.get("Content-Type", "").lower()
+
+        if "application/json" in content_type:
+            raise ValueError(
+                "A API retornou JSON em vez do conteúdo do caderno. "
+                f"Resposta: {response.text[:500]}"
+            )
+
+        return response.content
+
     def close(self) -> None:
-        """
-        Encerra a sessão HTTP.
-        """
+        """Encerra a sessão HTTP."""
 
         self.session.close()
 
