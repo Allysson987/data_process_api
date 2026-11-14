@@ -1,13 +1,13 @@
-
 import logging
 
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
-from apscheduler.schedulers.background import BackgroundScheduler
+from apscheduler.schedulers.blocking import BlockingScheduler
 from apscheduler.triggers.interval import IntervalTrigger
 
 from app.core.config import settings
+
 from app.scheduler.diary_jobs import (
     DiarySyncJob,
     DiaryNationalSyncJob
@@ -17,6 +17,7 @@ from app.scheduler.diary_jobs import (
 logger = logging.getLogger(__name__)
 
 INTERVAL_MINUTES = 1440
+
 TIMEZONE = ZoneInfo("America/Recife")
 
 
@@ -29,7 +30,7 @@ def get_ufs() -> list[str]:
     ]
 
 
-def create_scheduler() -> BackgroundScheduler:
+def create_scheduler() -> BlockingScheduler:
 
     ufs = get_ufs()
 
@@ -38,7 +39,7 @@ def create_scheduler() -> BackgroundScheduler:
         ufs
     )
 
-    scheduler = BackgroundScheduler(
+    scheduler = BlockingScheduler(
         timezone=TIMEZONE
     )
 
@@ -49,6 +50,7 @@ def create_scheduler() -> BackgroundScheduler:
 
         scheduler.add_job(
             func=diary_job.execute,
+
             trigger=IntervalTrigger(
                 minutes=INTERVAL_MINUTES,
                 start_date=(
@@ -57,8 +59,10 @@ def create_scheduler() -> BackgroundScheduler:
                 ),
                 timezone=TIMEZONE
             ),
+
             id="daily_diary_sync",
             name="Sincronização diária estadual",
+
             max_instances=1,
             coalesce=True,
             misfire_grace_time=3600,
@@ -70,6 +74,7 @@ def create_scheduler() -> BackgroundScheduler:
 
     scheduler.add_job(
         func=national_job.execute,
+
         trigger=IntervalTrigger(
             minutes=INTERVAL_MINUTES,
             start_date=(
@@ -78,8 +83,10 @@ def create_scheduler() -> BackgroundScheduler:
             ),
             timezone=TIMEZONE
         ),
+
         id="daily_national_diary_sync",
         name="Sincronização diária nacional",
+
         max_instances=1,
         coalesce=True,
         misfire_grace_time=3600,
