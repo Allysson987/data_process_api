@@ -1,5 +1,4 @@
 
-import os
 import logging
 
 from contextlib import asynccontextmanager
@@ -8,7 +7,6 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.router import api_router
-from app.scheduler.scheduler import create_scheduler
 
 
 logger = logging.getLogger(__name__)
@@ -17,22 +15,13 @@ logger = logging.getLogger(__name__)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
 
-    scheduler = create_scheduler()
-    scheduler.start()
-
-    app.state.scheduler = scheduler
-
-    logger.info("Scheduler iniciado junto com a API.")
+    logger.info("Iniciando Data Process API.")
 
     try:
         yield
 
     finally:
-        logger.info("Encerrando scheduler...")
-
-        scheduler.shutdown(wait=True)
-
-        logger.info("Scheduler encerrado.")
+        logger.info("Encerrando Data Process API.")
 
 
 app = FastAPI(
@@ -60,13 +49,24 @@ origins = [
     "https://front-data-process-api.onrender.com"
 ]
 
+
 # CORS
 app.add_middleware(
     CORSMiddleware,
     allow_origins=origins,
     allow_credentials=True,
-    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-    allow_headers=["Authorization", "Content-Type"],
+    allow_methods=[
+        "GET",
+        "POST",
+        "PUT",
+        "PATCH",
+        "DELETE",
+        "OPTIONS"
+    ],
+    allow_headers=[
+        "Authorization",
+        "Content-Type"
+    ],
 )
 
 
