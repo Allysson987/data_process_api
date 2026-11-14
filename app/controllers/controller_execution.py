@@ -1,25 +1,27 @@
 
-from datetime import datetime, timezone
-from uuid import uuid4
 import logging
+
+from datetime import date, datetime, timezone
+from uuid import uuid4
 
 from app.use_cases.datajud_service import DataJudService
 from app.utils.diary_rules import RulesDiary
 
 from app.database.connection import SessionLocal
 from app.database.redis_connection import redis_client
+
 from app.repositories.diary_repository import DiaryRepository
-from datetime import date, datetime, timezone
 
 from app.use_cases.diary_office.office_diary_nation import (
     ComunicaPjeService,
 )
 
+
 logger = logging.getLogger(__name__)
 
 
 class ExecutionAlreadyRunningError(Exception):
-    """Indica que já existe uma coleta ativa para a UF."""
+    """Indica que já existe uma coleta ativa."""
 
 
 class ControllerExecutionDataJud:
@@ -44,12 +46,22 @@ class ControllerExecutionDataJud:
     def __init__(self):
         self.data_jud_service = DataJudService()
         self.diary_rules = RulesDiary()
+        self.comunica_pje_service = ComunicaPjeService()
+
+    # =====================================================
+    # DATAJUD
+    # =====================================================
 
     def consult_process_data_jud(self, number_case: str):
 
         return self.data_jud_service.get_process_info(
             number_case
         )
+
+    # =====================================================
+    # MAPEAMENTO COMUNICA PJE
+    # =====================================================
+
     @staticmethod
     def _map_comunica_pje(
         communication: dict,
@@ -70,7 +82,8 @@ class ControllerExecutionDataJud:
 
         if not available_date:
             raise ValueError(
-                f"Comunicação {communication_id} sem data de disponibilização."
+                f"Comunicação {communication_id} "
+                "sem data de disponibilização."
             )
 
         publication_date = date.fromisoformat(
@@ -106,6 +119,11 @@ class ControllerExecutionDataJud:
             "content": communication.get("texto") or "",
             "pdf_url": "https://comunica.pje.jus.br/"
         }
+
+    # =====================================================
+    # COLETA ESTADUAL
+    # =====================================================
+
     def consult_diary_rules(self, uf: str):
 
         if redis_client is None:
@@ -160,12 +178,11 @@ class ControllerExecutionDataJud:
 
             for diary_data in collector.build_diary():
 
-                # Valida o retorno do coletor.
                 if not isinstance(diary_data, dict):
                     raise TypeError(
                         "O coletor retornou um tipo inválido. "
-                        f"Esperado dict, recebido {type(diary_data).__name__}. "
-                        f"Conteúdo: {str(diary_data)[:300]}"
+                        f"Esperado dict, recebido "
+                        f"{type(diary_data).__name__}."
                     )
 
                 db = SessionLocal()
@@ -218,11 +235,14 @@ class ControllerExecutionDataJud:
                     )
 
                 except Exception:
+
                     db.rollback()
+
                     logger.exception(
                         "Erro ao persistir diário: %s",
                         diary_data.get("source_id")
                     )
+
                     raise
 
                 finally:
@@ -260,6 +280,7 @@ class ControllerExecutionDataJud:
             ).isoformat()
 
             try:
+
                 redis_client.hset(
                     status_key,
                     mapping={
@@ -276,6 +297,7 @@ class ControllerExecutionDataJud:
                 )
 
             except Exception:
+
                 logger.exception(
                     "Não foi possível atualizar o status no Redis."
                 )
@@ -290,6 +312,7 @@ class ControllerExecutionDataJud:
         finally:
 
             try:
+
                 redis_client.eval(
                     self.RELEASE_LOCK_SCRIPT,
                     1,
@@ -298,7 +321,283 @@ class ControllerExecutionDataJud:
                 )
 
             except Exception:
+
                 logger.exception(
                     "Não foi possível liberar o bloqueio Redis da UF %s.",
                     uf.upper()
                 )
+
+    # =====================================================
+    # COLETA NACIONAL - COMUNICA PJE
+    # =====================================================
+
+    def consult_comunica_pje(self):
+
+        if redis_client is None:
+            raise RuntimeError("Redis não está configurado.")
+
+        lock_key = "diary:lock:NATIONAL"
+        status_key = "diary:status:NATIONAL"
+
+        execution_token = str(uuid4())
+
+        acquired = redis_client.set(
+            lock_key,
+            execution_token,
+            nx=True,
+            ex=self.LOCK_TTL
+        )
+
+        if not acquired:
+            raise ExecutionAlreadyRunningError(
+                "Já existe uma coleta nacional em andamento."
+            )
+
+        total_saved = 0
+        states = {}
+        has_failures = False
+
+        try:
+
+            started_at = datetime.now(
+                timezone.utc
+            ).isoformat()
+
+            redis_client.hset(
+                status_key,
+                mapping={
+                    "source": "NATIONAL",
+                    "status": "running",
+                    "saved_count": 0,
+                    "current_source_id": "",
+                    "started_at": started_at,
+                    "updated_at": started_at,
+                    "error": ""
+                }
+            )
+
+            redis_client.expire(
+                status_key,
+                self.STATUS_TTL
+            )
+
+            tribunals = (
+                self.comunica_pje_service.get_available_state_courts()
+            )
+
+            logger.info(
+                "Tribunais disponíveis na API CNJ: %s",
+                tribunals
+            )
+
+            if not tribunals:
+                raise RuntimeError(
+                    "Nenhum tribunal estadual foi identificado na API CNJ."
+                )
+
+            for tribunal in tribunals:
+
+                uf = next(
+                    (
+                        state
+                        for state, sigla in
+                        self.comunica_pje_service.STATE_COURTS.items()
+                        if sigla == tribunal
+                    ),
+                    None
+                )
+
+                if not uf:
+                    continue
+
+                state_saved = 0
+
+                logger.info(
+                    "Iniciando coleta nacional: %s",
+                    tribunal
+                )
+
+                try:
+
+                    communications = (
+                        self.comunica_pje_service.iter_communications(
+                            tribunal=tribunal,
+                            items_per_page=50
+                        )
+                    )
+
+                    for communication in communications:
+
+                        diary_data = self._map_comunica_pje(
+                            communication=communication,
+                            tribunal=tribunal
+                        )
+
+                        db = SessionLocal()
+
+                        try:
+
+                            repository = DiaryRepository(db)
+
+                            repository.create(diary_data)
+
+                            state_saved += 1
+                            total_saved += 1
+
+                        except Exception:
+
+                            db.rollback()
+
+                            logger.exception(
+                                "Erro ao persistir comunicação %s",
+                                communication.get("id")
+                            )
+
+                            raise
+
+                        finally:
+                            db.close()
+
+                        lock_renewed = redis_client.eval(
+                            self.RENEW_LOCK_SCRIPT,
+                            1,
+                            lock_key,
+                            execution_token,
+                            self.LOCK_TTL
+                        )
+
+                        if not lock_renewed:
+                            raise RuntimeError(
+                                "Bloqueio Redis nacional perdido."
+                            )
+
+                        updated_at = datetime.now(
+                            timezone.utc
+                        ).isoformat()
+
+                        redis_client.hset(
+                            status_key,
+                            mapping={
+                                "status": "running",
+                                "saved_count": total_saved,
+                                "current_source_id": str(
+                                    diary_data["source_id"]
+                                ),
+                                "updated_at": updated_at
+                            }
+                        )
+
+                        redis_client.expire(
+                            status_key,
+                            self.STATUS_TTL
+                        )
+
+                    states[uf] = {
+                        "status": "completed",
+                        "saved_count": state_saved
+                    }
+
+                    logger.info(
+                        "Coleta de %s concluída. Salvos: %s",
+                        tribunal,
+                        state_saved
+                    )
+
+                except Exception as error:
+
+                    has_failures = True
+
+                    states[uf] = {
+                        "status": "failed",
+                        "saved_count": state_saved,
+                        "error": str(error)[:500]
+                    }
+
+                    logger.exception(
+                        "Falha na coleta do tribunal %s",
+                        tribunal
+                    )
+
+            finished_at = datetime.now(
+                timezone.utc
+            ).isoformat()
+
+            final_status = (
+                "partial" if has_failures else "completed"
+            )
+
+            redis_client.hset(
+                status_key,
+                mapping={
+                    "status": final_status,
+                    "saved_count": total_saved,
+                    "finished_at": finished_at,
+                    "updated_at": finished_at
+                }
+            )
+
+            redis_client.expire(
+                status_key,
+                self.STATUS_TTL
+            )
+
+            return {
+                "status": final_status,
+                "states": states,
+                "total_saved": total_saved,
+                "total_duplicates": 0
+            }
+
+        except Exception as error:
+
+            failed_at = datetime.now(
+                timezone.utc
+            ).isoformat()
+
+            try:
+
+                redis_client.hset(
+                    status_key,
+                    mapping={
+                        "status": "failed",
+                        "saved_count": total_saved,
+                        "error": str(error)[:1000],
+                        "updated_at": failed_at
+                    }
+                )
+
+                redis_client.expire(
+                    status_key,
+                    self.STATUS_TTL
+                )
+
+            except Exception:
+
+                logger.exception(
+                    "Erro ao atualizar status da coleta nacional."
+                )
+
+            logger.exception(
+                "Falha na coleta nacional do Comunica PJe."
+            )
+
+            raise
+
+        finally:
+
+            try:
+
+                redis_client.eval(
+                    self.RELEASE_LOCK_SCRIPT,
+                    1,
+                    lock_key,
+                    execution_token
+                )
+
+            except Exception:
+
+                logger.exception(
+                    "Não foi possível liberar o bloqueio nacional."
+                )
+
+            self.comunica_pje_service.close()
