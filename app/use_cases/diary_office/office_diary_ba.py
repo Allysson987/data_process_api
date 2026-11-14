@@ -1,13 +1,13 @@
 
-import io
 import re
 import requests
-import pdfplumber
 
 from bs4 import BeautifulSoup
 from datetime import datetime, date
 from html import unescape
 from urllib.parse import urljoin
+
+from app.utils.extract_pdfs import ExtractPdf
 
 
 class DjeBaGetData:
@@ -33,6 +33,7 @@ class DjeBaGetData:
     def __init__(self):
 
         self.session = requests.Session()
+        self.pdf_extractor = ExtractPdf()
 
         self.session.headers.update({
             "User-Agent": (
@@ -42,7 +43,7 @@ class DjeBaGetData:
             )
         })
 
-    def initialize_session(self):
+    def initialize_session(self) -> str:
 
         response = self.session.get(
             f"{self.BASE_URL}/pesquisar.wsp",
@@ -80,7 +81,12 @@ class DjeBaGetData:
             month = self.MONTHS.get(month_name)
 
             if month:
-                return date(year, month, day)
+
+                try:
+                    return date(year, month, day)
+
+                except ValueError:
+                    return None
 
         numeric_date = re.search(
             r"\b(\d{2})/(\d{2})/(\d{4})\b",
@@ -89,10 +95,14 @@ class DjeBaGetData:
 
         if numeric_date:
 
-            return datetime.strptime(
-                numeric_date.group(0),
-                "%d/%m/%Y"
-            ).date()
+            try:
+                return datetime.strptime(
+                    numeric_date.group(0),
+                    "%d/%m/%Y"
+                ).date()
+
+            except ValueError:
+                return None
 
         return None
 
@@ -117,7 +127,7 @@ class DjeBaGetData:
             )
 
             match = re.search(
-                r"ver\s*\(\s*['\"]?(\d+)",
+                r"\bver\s*\(\s*['\"]?(\d+)",
                 reference,
                 re.IGNORECASE
             )
@@ -127,9 +137,10 @@ class DjeBaGetData:
 
             edition_number = match.group(1)
 
-            # Procura a data no elemento e nos elementos
-            # ancestrais, pois a data pode estar na mesma linha.
-            context = anchor.get_text(" ", strip=True)
+            context = anchor.get_text(
+                " ",
+                strip=True
+            )
 
             parent = anchor.parent
 
@@ -162,12 +173,9 @@ class DjeBaGetData:
 
             raise ValueError(
                 "[TJBA] Não foi possível identificar "
-                "edições com suas respectivas datas em "
-                "pesquisar.wsp."
+                "edições com suas respectivas datas."
             )
 
-        # Seleciona a edição com a data de publicação
-        # mais recente, sem depender de número fixo.
         latest = max(
             editions,
             key=lambda item: (
@@ -190,9 +198,7 @@ class DjeBaGetData:
         edition: str
     ) -> tuple[str, BeautifulSoup]:
 
-        menu_url = (
-            f"{self.BASE_URL}/menu.wsp"
-        )
+        menu_url = f"{self.BASE_URL}/menu.wsp"
 
         response = self.session.get(
             menu_url,
@@ -219,7 +225,7 @@ class DjeBaGetData:
     def download_full_diary(
         self,
         edition: str
-    ) -> bytes:
+    ) -> tuple[bytes, str]:
 
         print(
             f"[TJBA] Preparando download da edição "
@@ -227,9 +233,7 @@ class DjeBaGetData:
             flush=True
         )
 
-        menu_url, soup = self.get_menu(
-            edition
-        )
+        menu_url, soup = self.get_menu(edition)
 
         form = soup.find(
             "form",
@@ -237,12 +241,12 @@ class DjeBaGetData:
         )
 
         if form is None:
+
             raise ValueError(
                 "[TJBA] Formulário fmMenu não encontrado "
                 "no menu da edição."
             )
 
-        # Recupera os campos reais do formulário.
         payload = {}
 
         for field in form.find_all(
@@ -253,16 +257,10 @@ class DjeBaGetData:
             name = field.get("name")
 
             if name:
-                payload[name] = field.get(
-                    "value",
-                    ""
-                )
+                payload[name] = field.get("value", "")
 
-        # A edição é definida dinamicamente.
         payload["tmp.diario.nu_edicao"] = edition
 
-        # O JavaScript abrirDiario() altera a ação
-        # do formulário para download.wsp.
         download_url = urljoin(
             menu_url,
             "download.wsp"
@@ -300,96 +298,50 @@ class DjeBaGetData:
                 if chunk:
                     pdf_bytes.extend(chunk)
 
-            pdf_content = bytes(pdf_bytes)
-
-            if not pdf_content.startswith(b"%PDF-"):
+            if not pdf_bytes.startswith(b"%PDF-"):
 
                 raise ValueError(
                     "[TJBA] A resposta não é um PDF. "
                     f"Content-Type: "
                     f"{response.headers.get('Content-Type')}. "
-                    f"Resposta: {pdf_content[:300]!r}"
+                    f"Resposta: {bytes(pdf_bytes[:300])!r}"
                 )
+
+            pdf_url = response.url
 
             print(
                 f"[TJBA] PDF completo baixado: "
-                f"{len(pdf_content) / 1024:.2f} KB",
+                f"{len(pdf_bytes) / 1024:.2f} KB",
                 flush=True
             )
 
-            return pdf_content
+            return bytes(pdf_bytes), pdf_url
 
         finally:
             response.close()
-
-    def extract_pdf(
-        self,
-        pdf_bytes: bytes
-    ) -> str:
-
-        pages_text = []
-
-        with pdfplumber.open(
-            io.BytesIO(pdf_bytes)
-        ) as pdf:
-
-            total_pages = len(pdf.pages)
-
-            print(
-                f"[TJBA] Total de páginas: "
-                f"{total_pages}",
-                flush=True
-            )
-
-            for index, page in enumerate(
-                pdf.pages,
-                start=1
-            ):
-
-                print(
-                    f"[TJBA] Extraindo página "
-                    f"{index}/{total_pages}",
-                    flush=True
-                )
-
-                page_text = page.extract_text()
-
-                if page_text:
-                    pages_text.append(page_text)
-
-        content = "\n\n".join(pages_text)
-
-        print(
-            f"[TJBA] Extração concluída: "
-            f"{len(content)} caracteres",
-            flush=True
-        )
-
-        return content
 
     def build_diary(self):
 
         html = self.initialize_session()
 
-        edition_data = self.get_latest_edition(
-            html
-        )
+        edition_data = self.get_latest_edition(html)
 
         edition = edition_data["edition"]
 
-        publication_date = edition_data[
-            "publication_date"
-        ]
+        publication_date = edition_data["publication_date"]
 
         try:
 
-            pdf_bytes = self.download_full_diary(
+            pdf_bytes, pdf_url = self.download_full_diary(
                 edition
             )
 
-            content = self.extract_pdf(
-                pdf_bytes
+            content = self.pdf_extractor.extract_full_pages(
+                pdf_bytes=pdf_bytes,
+                uf="BA"
             )
+
+            del pdf_bytes
 
             if not content.strip():
 
@@ -398,7 +350,7 @@ class DjeBaGetData:
                     "foi possível extrair texto."
                 )
 
-            yield {
+            diary_data = {
                 "source": "TJBA",
 
                 "source_id": edition,
@@ -414,12 +366,17 @@ class DjeBaGetData:
                     f"- Edição {edition}"
                 ),
 
-                "pdf_url": (
-                    f"{self.BASE_URL}/download.wsp"
-                ),
+                "pdf_url": pdf_url,
 
                 "content": content
             }
+
+            print(
+                "[TJBA] Diário entregue ao Controller",
+                flush=True
+            )
+
+            yield diary_data
 
         except Exception as error:
 
@@ -448,9 +405,7 @@ if __name__ == "__main__":
         print("Publicação:", diary["publication_date"])
         print("Caracteres:", len(diary["content"]))
 
-        filename = (
-            f"TJBA_{diary['source_id']}.txt"
-        )
+        filename = f"TJBA_{diary['source_id']}.txt"
 
         with open(
             filename,
