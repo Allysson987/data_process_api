@@ -1,339 +1,418 @@
 
-from collections.abc import Iterator
-from typing import Any
-
+import re
 import requests
 
+from bs4 import BeautifulSoup
+from datetime import datetime, date
+from html import unescape
+from urllib.parse import urljoin
 
-class ComunicaPjeService:
-    """
-    Cliente da API pública Comunica PJe / DJEN do CNJ.
+from app.utils.extract_pdfs import ExtractPdf
 
-    Documentação:
-        https://hcomunicaapi.cnj.jus.br/swagger/index.html
 
-    API de produção:
-        https://comunicaapi.pje.jus.br/api/v1
-    """
+class DjeBaGetData:
 
-    BASE_URL = "https://comunicaapi.pje.jus.br/api/v1"
+    BASE_URL = "https://diario.tjba.jus.br/diario/internet"
 
-    # Tribunais de Justiça estaduais e Distrito Federal.
-    STATE_COURTS = {
-        "AC": "TJAC",
-        "AL": "TJAL",
-        "AP": "TJAP",
-        "AM": "TJAM",
-        "BA": "TJBA",
-        "CE": "TJCE",
-        "DF": "TJDFT",
-        "ES": "TJES",
-        "GO": "TJGO",
-        "MA": "TJMA",
-        "MT": "TJMT",
-        "MS": "TJMS",
-        "MG": "TJMG",
-        "PA": "TJPA",
-        "PB": "TJPB",
-        "PR": "TJPR",
-        "PE": "TJPE",
-        "PI": "TJPI",
-        "RJ": "TJRJ",
-        "RN": "TJRN",
-        "RS": "TJRS",
-        "RO": "TJRO",
-        "RR": "TJRR",
-        "SC": "TJSC",
-        "SP": "TJSP",
-        "SE": "TJSE",
-        "TO": "TJTO",
+    MONTHS = {
+        "janeiro": 1,
+        "fevereiro": 2,
+        "março": 3,
+        "marco": 3,
+        "abril": 4,
+        "maio": 5,
+        "junho": 6,
+        "julho": 7,
+        "agosto": 8,
+        "setembro": 9,
+        "outubro": 10,
+        "novembro": 11,
+        "dezembro": 12,
     }
 
-    def __init__(self, timeout: int = 30):
-        self.timeout = timeout
+    def __init__(self):
 
         self.session = requests.Session()
+        self.pdf_extractor = ExtractPdf()
 
         self.session.headers.update({
-            "Accept": "application/json",
-            "User-Agent": "Mozilla/5.0",
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/130.0.0.0 Safari/537.36"
+            )
         })
 
-    def _get(
-        self,
-        endpoint: str,
-        params: dict | None = None,
-    ) -> Any:
-        """
-        Executa uma requisição GET na API.
-
-        Retorna o JSON original, sem presumir que a resposta
-        será necessariamente um dicionário.
-
-        Isso é importante porque /comunicacao/tribunal
-        pode retornar uma estrutura diferente de /comunicacao.
-        """
-
-        url = f"{self.BASE_URL}/{endpoint.lstrip('/')}"
+    def initialize_session(self) -> str:
 
         response = self.session.get(
-            url,
-            params=params,
-            timeout=self.timeout,
+            f"{self.BASE_URL}/pesquisar.wsp",
+            timeout=(15, 30)
         )
 
         response.raise_for_status()
 
+        print(
+            "[TJBA] Sessão inicializada",
+            flush=True
+        )
+
+        return response.text
+
+    def parse_publication_date(
+        self,
+        text: str
+    ) -> date | None:
+
+        normalized = unescape(text).lower()
+
+        pattern = re.search(
+            r"(\d{1,2})\s+de\s+"
+            r"([a-zçãõ]+)\s+de\s+(\d{4})",
+            normalized
+        )
+
+        if pattern:
+
+            day = int(pattern.group(1))
+            month_name = pattern.group(2)
+            year = int(pattern.group(3))
+
+            month = self.MONTHS.get(month_name)
+
+            if month:
+
+                try:
+                    return date(year, month, day)
+
+                except ValueError:
+                    return None
+
+        numeric_date = re.search(
+            r"\b(\d{2})/(\d{2})/(\d{4})\b",
+            normalized
+        )
+
+        if numeric_date:
+
+            try:
+                return datetime.strptime(
+                    numeric_date.group(0),
+                    "%d/%m/%Y"
+                ).date()
+
+            except ValueError:
+                return None
+
+        return None
+
+    def get_latest_edition(
+        self,
+        html: str
+    ) -> dict:
+
+        soup = BeautifulSoup(
+            html,
+            "html.parser"
+        )
+
+        editions = []
+
+        for anchor in soup.find_all("a"):
+
+            reference = (
+                anchor.get("href", "")
+                + " "
+                + anchor.get("onclick", "")
+            )
+
+            match = re.search(
+                r"\bver\s*\(\s*['\"]?(\d+)",
+                reference,
+                re.IGNORECASE
+            )
+
+            if not match:
+                continue
+
+            edition_number = match.group(1)
+
+            context = anchor.get_text(
+                " ",
+                strip=True
+            )
+
+            parent = anchor.parent
+
+            for _ in range(4):
+
+                if parent is None:
+                    break
+
+                context += " " + parent.get_text(
+                    " ",
+                    strip=True
+                )
+
+                parent = parent.parent
+
+            publication_date = self.parse_publication_date(
+                context
+            )
+
+            if publication_date is None:
+                continue
+
+            editions.append({
+                "edition": edition_number,
+                "publication_date": publication_date,
+                "title": context.strip()
+            })
+
+        if not editions:
+
+            raise ValueError(
+                "[TJBA] Não foi possível identificar "
+                "edições com suas respectivas datas."
+            )
+
+        latest = max(
+            editions,
+            key=lambda item: (
+                item["publication_date"],
+                int(item["edition"])
+            )
+        )
+
+        print(
+            f"[TJBA] Última edição encontrada: "
+            f"{latest['edition']} | "
+            f"Data: {latest['publication_date']}",
+            flush=True
+        )
+
+        return latest
+
+    def get_menu(
+        self,
+        edition: str
+    ) -> tuple[str, BeautifulSoup]:
+
+        menu_url = f"{self.BASE_URL}/menu.wsp"
+
+        response = self.session.get(
+            menu_url,
+            params={
+                "tmp.diario.nu_edicao": edition
+            },
+            headers={
+                "Referer": (
+                    f"{self.BASE_URL}/pesquisar.wsp"
+                )
+            },
+            timeout=(15, 30)
+        )
+
+        response.raise_for_status()
+
+        soup = BeautifulSoup(
+            response.text,
+            "html.parser"
+        )
+
+        return response.url, soup
+
+    def download_full_diary(
+        self,
+        edition: str
+    ) -> tuple[bytes, str]:
+
+        print(
+            f"[TJBA] Preparando download da edição "
+            f"{edition}",
+            flush=True
+        )
+
+        menu_url, soup = self.get_menu(edition)
+
+        form = soup.find(
+            "form",
+            attrs={"name": "fmMenu"}
+        )
+
+        if form is None:
+
+            raise ValueError(
+                "[TJBA] Formulário fmMenu não encontrado "
+                "no menu da edição."
+            )
+
+        payload = {}
+
+        for field in form.find_all(
+            "input",
+            attrs={"type": "hidden"}
+        ):
+
+            name = field.get("name")
+
+            if name:
+                payload[name] = field.get("value", "")
+
+        payload["tmp.diario.nu_edicao"] = edition
+
+        download_url = urljoin(
+            menu_url,
+            "download.wsp"
+        )
+
+        response = self.session.post(
+            download_url,
+            data=payload,
+            headers={
+                "Referer": menu_url,
+                "Origin": "https://diario.tjba.jus.br",
+                "Content-Type": (
+                    "application/x-www-form-urlencoded"
+                )
+            },
+            timeout=(15, 120),
+            stream=True
+        )
+
         try:
-            return response.json()
 
-        except requests.exceptions.JSONDecodeError as error:
-            raise ValueError(
-                f"A API retornou uma resposta que não é JSON. "
-                f"Endpoint: {endpoint}. "
-                f"Resposta: {response.text[:500]}"
-            ) from error
-
-    def get_tribunals(self) -> Any:
-        """
-        Retorna os tribunais cadastrados na API.
-
-        Endpoint:
-            GET /comunicacao/tribunal
-
-        A resposta é mantida em seu formato original,
-        pois não se deve presumir que seja um dict.
-        """
-
-        return self._get("comunicacao/tribunal")
-
-    def get_state_courts(self) -> dict[str, str]:
-        """
-        Retorna o mapeamento dos TJs estaduais e do TJDFT.
-
-        Essa lista representa os tribunais conhecidos.
-        Não significa que todos estejam necessariamente
-        cadastrados ou ativos na API.
-        """
-
-        return self.STATE_COURTS.copy()
-
-    def extract_tribunal_siglas(
-        self,
-        response: Any,
-    ) -> list[str]:
-        """
-        Extrai siglas de tribunais de uma resposta JSON.
-
-        Aceita estruturas aninhadas em listas e dicionários.
-        """
-
-        siglas = set()
-
-        def search(data: Any):
-
-            if isinstance(data, dict):
-
-                sigla = (
-                    data.get("siglaTribunal")
-                    or data.get("sigla")
-                )
-
-                if isinstance(sigla, str):
-                    siglas.add(sigla.upper().strip())
-
-                for value in data.values():
-
-                    if isinstance(value, (dict, list)):
-                        search(value)
-
-            elif isinstance(data, list):
-
-                for item in data:
-                    search(item)
-
-            elif isinstance(data, str):
-
-                siglas.add(data.upper().strip())
-
-        search(response)
-
-        # Considera apenas os tribunais conhecidos no mapeamento.
-        known_courts = set(self.STATE_COURTS.values())
-
-        return sorted(
-            sigla
-            for sigla in siglas
-            if sigla in known_courts
-        )
-
-    def get_available_state_courts(self) -> list[str]:
-        """
-        Retorna os tribunais estaduais identificados
-        na listagem disponibilizada pela API.
-        """
-
-        response = self.get_tribunals()
-
-        return self.extract_tribunal_siglas(response)
-
-    def get_communications(
-        self,
-        *,
-        tribunal: str | None = None,
-        process_number: str | None = None,
-        lawyer_name: str | None = None,
-        lawyer_oab: str | None = None,
-        lawyer_uf: str | None = None,
-        party_name: str | None = None,
-        text: str | None = None,
-        date_start: str | None = None,
-        date_end: str | None = None,
-        medium: str | None = None,
-        page: int = 1,
-        items_per_page: int = 50,
-    ) -> dict[str, Any]:
-        """
-        Consulta comunicações processuais.
-
-        Datas:
-            YYYY-MM-DD
-
-        Meio:
-            D = Diário de Justiça Eletrônico Nacional
-            E = Plataforma Nacional de Editais
-        """
-
-        if page < 1:
-            raise ValueError(
-                "A página deve ser maior ou igual a 1."
+            print(
+                f"[TJBA] HTTP: {response.status_code}",
+                flush=True
             )
 
-        if items_per_page < 1:
-            raise ValueError(
-                "items_per_page deve ser maior que zero."
-            )
+            response.raise_for_status()
 
-        params = {
-            "siglaTribunal": tribunal.upper() if tribunal else None,
-            "numeroProcesso": process_number,
-            "nomeAdvogado": lawyer_name,
-            "numeroOab": lawyer_oab,
-            "ufOab": lawyer_uf.upper() if lawyer_uf else None,
-            "nomeParte": party_name,
-            "texto": text,
-            "dataDisponibilizacaoInicio": date_start,
-            "dataDisponibilizacaoFim": date_end,
-            "meio": medium.upper() if medium else None,
-            "pagina": page,
-            "itensPorPagina": items_per_page,
-        }
+            pdf_bytes = bytearray()
 
-        params = {
-            key: value
-            for key, value in params.items()
-            if value is not None
-        }
+            for chunk in response.iter_content(
+                chunk_size=64 * 1024
+            ):
 
-        response = self._get(
-            "comunicacao",
-            params=params,
-        )
+                if chunk:
+                    pdf_bytes.extend(chunk)
 
-        if not isinstance(response, dict):
-            raise ValueError(
-                "A API de comunicações não retornou um objeto JSON."
-            )
+            if not pdf_bytes.startswith(b"%PDF-"):
 
-        return response
-
-    def iter_communications(
-        self,
-        *,
-        max_pages: int | None = None,
-        **filters: Any,
-    ) -> Iterator[dict[str, Any]]:
-        """
-        Percorre as páginas e entrega uma comunicação por vez.
-
-        max_pages:
-            Limita a quantidade de páginas consultadas.
-
-        Sem max_pages:
-            Continua até encontrar uma página vazia
-            ou uma página com menos itens que o limite.
-        """
-
-        page = 1
-        items_per_page = filters.get("items_per_page", 50)
-
-        while max_pages is None or page <= max_pages:
-
-            response = self.get_communications(
-                page=page,
-                **filters,
-            )
-
-            items = response.get("items", [])
-
-            if not isinstance(items, list):
                 raise ValueError(
-                    "O campo 'items' da API não retornou uma lista."
+                    "[TJBA] A resposta não é um PDF. "
+                    f"Content-Type: "
+                    f"{response.headers.get('Content-Type')}. "
+                    f"Resposta: {bytes(pdf_bytes[:300])!r}"
                 )
 
-            if not items:
-                break
+            pdf_url = response.url
 
-            yield from items
-
-            if len(items) < items_per_page:
-                break
-
-            page += 1
-
-    def search_process(
-        self,
-        process_number: str,
-        tribunal: str | None = None,
-        date_start: str | None = None,
-        date_end: str | None = None,
-    ) -> Iterator[dict[str, Any]]:
-        """
-        Atalho para buscar comunicações de um processo.
-        """
-
-        normalized_number = "".join(
-            char
-            for char in process_number
-            if char.isdigit()
-        )
-
-        if not normalized_number:
-            raise ValueError(
-                "Número de processo inválido."
+            print(
+                f"[TJBA] PDF completo baixado: "
+                f"{len(pdf_bytes) / 1024:.2f} KB",
+                flush=True
             )
 
-        return self.iter_communications(
-            tribunal=tribunal,
-            process_number=normalized_number,
-            date_start=date_start,
-            date_end=date_end,
-        )
+            return bytes(pdf_bytes), pdf_url
 
-    def close(self) -> None:
-        """
-        Encerra a sessão HTTP.
-        """
+        finally:
+            response.close()
 
-        self.session.close()
+    def build_diary(self):
 
-    def __enter__(self):
-        return self
+        html = self.initialize_session()
 
-    def __exit__(
-        self,
-        exc_type,
-        exc_value,
-        traceback,
-    ):
-        self.close()
+        edition_data = self.get_latest_edition(html)
+
+        edition = edition_data["edition"]
+
+        publication_date = edition_data["publication_date"]
+
+        try:
+
+            pdf_bytes, pdf_url = self.download_full_diary(
+                edition
+            )
+
+            content = self.pdf_extractor.extract_full_pages(
+                pdf_bytes=pdf_bytes,
+                uf="BA"
+            )
+
+            del pdf_bytes
+
+            if not content.strip():
+
+                raise ValueError(
+                    "O PDF foi baixado, mas não "
+                    "foi possível extrair texto."
+                )
+
+            diary_data = {
+                "source": "TJBA",
+
+                "source_id": edition,
+
+                "publication_date": publication_date,
+
+                "available_date": publication_date,
+
+                "update_date": datetime.now(),
+
+                "title": (
+                    f"Diário de Justiça do Estado da Bahia "
+                    f"- Edição {edition}"
+                ),
+
+                "pdf_url": pdf_url,
+
+                "content": content
+            }
+
+            print(
+                "[TJBA] Diário entregue ao Controller",
+                flush=True
+            )
+
+            yield diary_data
+
+        except Exception as error:
+
+            print(
+                f"[TJBA] Erro ao processar edição "
+                f"{edition}: {error}",
+                flush=True
+            )
+
+            raise
+
+
+if __name__ == "__main__":
+
+    provider = DjeBaGetData()
+
+    for diary in provider.build_diary():
+
+        print("\n" + "=" * 60)
+        print("DIÁRIO EXTRAÍDO")
+        print("=" * 60)
+
+        print("Fonte:", diary["source"])
+        print("ID:", diary["source_id"])
+        print("Título:", diary["title"])
+        print("Publicação:", diary["publication_date"])
+        print("Caracteres:", len(diary["content"]))
+
+        filename = f"TJBA_{diary['source_id']}.txt"
+
+        with open(
+            filename,
+            "w",
+            encoding="utf-8"
+        ) as file:
+
+            file.write(diary["content"])
+
+        print("Arquivo salvo:", filename)

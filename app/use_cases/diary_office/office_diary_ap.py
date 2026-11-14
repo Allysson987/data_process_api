@@ -1,27 +1,35 @@
 
-import io
 import requests
-import pdfplumber
+
+from app.utils.extract_pdfs import ExtractPdf
 
 
 class DjeApGetData:
 
     BASE_URL = "https://tucujuris.tjap.jus.br"
 
+    def __init__(self):
+
+        self.session = requests.Session()
+        self.pdf_extractor = ExtractPdf()
+
+        self.session.headers.update({
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/157.0.0.0 Safari/537.36"
+            )
+        })
+
     def get_last_diary(self) -> dict:
 
-        response = requests.get(
+        response = self.session.get(
             f"{self.BASE_URL}/api/dje/buscar-ultimos-diarios",
             headers={
                 "Accept": "application/json",
-                "Referer": f"{self.BASE_URL}/dje/consulta",
-                "User-Agent": (
-                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                    "AppleWebKit/537.36 (KHTML, like Gecko) "
-                    "Chrome/157.0.0.0 Safari/537.36"
-                )
+                "Referer": f"{self.BASE_URL}/dje/consulta"
             },
-            timeout=30
+            timeout=(15, 30)
         )
 
         response.raise_for_status()
@@ -35,39 +43,32 @@ class DjeApGetData:
                 "Nenhum diário recente encontrado no TJAP."
             )
 
-        return diaries[0]
+        diary = diaries[0]
 
-    def extract_pdf(
+        print(
+            f"[TJAP] Diário localizado: "
+            f"{diary.get('num_diario')}",
+            flush=True
+        )
+
+        return diary
+
+    def download_diary(
         self,
-        pdf_bytes: bytes
-    ) -> str:
-
-        text = ""
-
-        with pdfplumber.open(
-            io.BytesIO(pdf_bytes)
-        ) as pdf:
-
-            for page in pdf.pages:
-
-                text += (
-                    page.extract_text()
-                    or ""
-                )
-
-                text += "\n"
-
-        return text.strip()
-
-    def build_diary(self):
-
-        diary = self.get_last_diary()
+        diary: dict
+    ) -> tuple[bytes, str]:
 
         pdf_url = (
             f"{self.BASE_URL}/api/publico/download-diario"
         )
 
-        response = requests.get(
+        print(
+            f"[TJAP] Iniciando download do diário "
+            f"{diary['num_diario']}",
+            flush=True
+        )
+
+        response = self.session.get(
             pdf_url,
             params={
                 "id": diary["id"],
@@ -76,29 +77,66 @@ class DjeApGetData:
             },
             headers={
                 "Accept": "application/pdf",
-                "Referer": f"{self.BASE_URL}/dje/consulta",
-                "User-Agent": (
-                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                    "AppleWebKit/537.36 (KHTML, like Gecko) "
-                    "Chrome/157.0.0.0 Safari/537.36"
-                )
+                "Referer": f"{self.BASE_URL}/dje/consulta"
             },
-            timeout=60
+            timeout=(15, 90),
+            stream=True
         )
 
-        response.raise_for_status()
+        try:
 
-        if not response.content.startswith(b"%PDF"):
-            raise ValueError(
-                "O download do TJAP não retornou um PDF válido. "
-                f"Content-Type: {response.headers.get('Content-Type')}"
+            response.raise_for_status()
+
+            pdf_bytes = bytearray()
+
+            for chunk in response.iter_content(
+                chunk_size=64 * 1024
+            ):
+
+                if chunk:
+                    pdf_bytes.extend(chunk)
+
+            if not pdf_bytes.startswith(b"%PDF-"):
+
+                raise ValueError(
+                    "O download do TJAP não retornou "
+                    "um PDF válido. "
+                    f"Content-Type: "
+                    f"{response.headers.get('Content-Type')}"
+                )
+
+            final_url = response.url
+
+            print(
+                f"[TJAP] Download concluído: "
+                f"{len(pdf_bytes) / 1024:.2f} KB",
+                flush=True
             )
 
-        text = self.extract_pdf(
-            response.content
+            return bytes(pdf_bytes), final_url
+
+        finally:
+            response.close()
+
+    def build_diary(self):
+
+        diary = self.get_last_diary()
+
+        pdf_bytes, pdf_url = self.download_diary(diary)
+
+        content = self.pdf_extractor.extract_full_pages(
+            pdf_bytes=pdf_bytes,
+            uf="AP"
         )
 
-        yield {
+        del pdf_bytes
+
+        if not content.strip():
+            raise ValueError(
+                "PDF do TJAP sem texto extraído."
+            )
+
+        diary_data = {
             "source": "TJAP",
 
             "source_id": str(diary["id"]),
@@ -111,7 +149,43 @@ class DjeApGetData:
 
             "title": f"Diário {diary['num_diario']}",
 
-            "content": text,
+            "content": content,
 
-            "pdf_url": response.url
+            "pdf_url": pdf_url
         }
+
+        print(
+            "[TJAP] Diário entregue ao Controller",
+            flush=True
+        )
+
+        yield diary_data
+
+
+if __name__ == "__main__":
+
+    provider = DjeApGetData()
+
+    for diary in provider.build_diary():
+
+        print("\n" + "=" * 60)
+        print("DIÁRIO EXTRAÍDO")
+        print("=" * 60)
+
+        print("Fonte:", diary["source"])
+        print("ID:", diary["source_id"])
+        print("Título:", diary["title"])
+        print("Publicação:", diary["publication_date"])
+        print("Caracteres:", len(diary["content"]))
+
+        filename = f"TJAP_{diary['source_id']}.txt"
+
+        with open(
+            filename,
+            "w",
+            encoding="utf-8"
+        ) as file:
+
+            file.write(diary["content"])
+
+        print("Arquivo salvo:", filename)

@@ -1,21 +1,22 @@
 
-import io
 import re
 import requests
-import pdfplumber
 
 from datetime import datetime
+
+from app.utils.extract_pdfs import ExtractPdf
 
 
 class DjeAmGetData:
 
     BASE_URL = "https://consultasaj.tjam.jus.br/cdje"
 
-    TARGET_DATE = datetime.now().strftime('dd/mm/yyyy')
+    TARGET_DATE = datetime.now().strftime("%d/%m/%Y")
 
     def __init__(self):
 
         self.session = requests.Session()
+        self.pdf_extractor = ExtractPdf()
 
         self.session.headers.update({
             "User-Agent": (
@@ -25,7 +26,7 @@ class DjeAmGetData:
             )
         })
 
-    def initialize_session(self):
+    def initialize_session(self) -> None:
 
         response = self.session.get(
             f"{self.BASE_URL}/index.do",
@@ -98,13 +99,12 @@ class DjeAmGetData:
 
         if not cadernos:
             print(
-                "[TJAM] Resposta recebida:",
+                "[TJAM] Nenhum caderno identificado. "
+                "Resposta recebida:",
                 response.text[:3000],
                 flush=True
             )
-        print("\n[TJAM] RESPOSTA DE getListaDeCadernos.do:")
-        print(response.text)
-        
+
         return cadernos
 
     def get_secoes(
@@ -163,11 +163,6 @@ class DjeAmGetData:
 
         try:
 
-            print(
-                f"[TJAM] HTTP: {response.status_code}",
-                flush=True
-            )
-
             response.raise_for_status()
 
             pdf_bytes = bytearray()
@@ -199,57 +194,13 @@ class DjeAmGetData:
         finally:
             response.close()
 
-    def extract_pdf(
-        self,
-        pdf_bytes: bytes
-    ) -> str:
-
-        pages_text = []
-
-        with pdfplumber.open(
-            io.BytesIO(pdf_bytes)
-        ) as pdf:
-
-            print(
-                f"[TJAM] Total de páginas: {len(pdf.pages)}",
-                flush=True
-            )
-
-            for index, page in enumerate(
-                pdf.pages,
-                start=1
-            ):
-
-                print(
-                    f"[TJAM] Extraindo página "
-                    f"{index}/{len(pdf.pages)}",
-                    flush=True
-                )
-
-                page_text = page.extract_text()
-
-                if page_text:
-                    pages_text.append(page_text)
-
-        content = "\n".join(pages_text)
-
-        print(
-            f"[TJAM] Texto extraído: "
-            f"{len(content)} caracteres",
-            flush=True
-        )
-
-        return content
-
     def build_diary(self):
 
         self.initialize_session()
 
         dt_diario = self.TARGET_DATE
 
-        cadernos = self.get_cadernos(
-            dt_diario
-        )
+        cadernos = self.get_cadernos(dt_diario)
 
         if not cadernos:
             raise ValueError(
@@ -271,17 +222,10 @@ class DjeAmGetData:
                     flush=True
                 )
 
-                secoes = self.get_secoes(
-                    caderno
-                )
+                secoes = self.get_secoes(caderno)
 
                 print(
-                    "[TJAM] Seções retornadas:",
-                    flush=True
-                )
-
-                print(
-                    secoes[:3000],
+                    f"[TJAM] Seções retornadas: {len(secoes)} caracteres",
                     flush=True
                 )
 
@@ -290,16 +234,26 @@ class DjeAmGetData:
                     caderno
                 )
 
-                content = self.extract_pdf(
-                    pdf_bytes
+                content = self.pdf_extractor.extract_full_pages(
+                    pdf_bytes=pdf_bytes,
+                    uf="AM"
                 )
 
-                if not content:
+                del pdf_bytes
+
+                if not content.strip():
                     raise ValueError(
                         "PDF sem texto extraído."
                     )
 
-                yield {
+                pdf_url = (
+                    f"{self.BASE_URL}/downloadCaderno.do"
+                    f"?dtDiario={dt_diario}"
+                    f"&cdCaderno={caderno['cdCaderno']}"
+                    "&tpDownload=D"
+                )
+
+                diary_data = {
                     "source": "TJAM",
 
                     "source_id": (
@@ -315,15 +269,17 @@ class DjeAmGetData:
 
                     "title": caderno["nmCaderno"],
 
-                    "pdf_url": (
-                        f"{self.BASE_URL}/downloadCaderno.do"
-                        f"?dtDiario={dt_diario}"
-                        f"&cdCaderno={caderno['cdCaderno']}"
-                        "&tpDownload=D"
-                    ),
+                    "pdf_url": pdf_url,
 
                     "content": content
                 }
+
+                print(
+                    "[TJAM] Diário entregue ao Controller",
+                    flush=True
+                )
+
+                yield diary_data
 
             except Exception as error:
 
@@ -352,9 +308,7 @@ if __name__ == "__main__":
         print("Publicação:", diary["publication_date"])
         print("Caracteres:", len(diary["content"]))
 
-        filename = (
-            f"TJAM_{diary['source_id']}.txt"
-        )
+        filename = f"TJAM_{diary['source_id']}.txt"
 
         with open(
             filename,

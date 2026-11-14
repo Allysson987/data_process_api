@@ -1,10 +1,10 @@
 
-import io
 import re
 import requests
-import pdfplumber
 
 from datetime import datetime, timedelta
+
+from app.utils.extract_pdfs import ExtractPdf
 
 
 class DjeAlGetData:
@@ -14,6 +14,8 @@ class DjeAlGetData:
     def __init__(self):
 
         self.session = requests.Session()
+
+        self.pdf_extractor = ExtractPdf()
 
         self.session.headers.update({
             "User-Agent": (
@@ -98,7 +100,7 @@ class DjeAlGetData:
                 if cadernos:
                     return dt_diario, cadernos
 
-            except requests.exceptions.HTTPError as error:
+            except requests.exceptions.RequestException as error:
 
                 print(
                     f"[TJAL] Erro HTTP em {dt_diario}: {error}",
@@ -137,16 +139,16 @@ class DjeAlGetData:
             stream=True
         )
 
-        print(
-            f"[TJAL] Status HTTP: {response.status_code}",
-            flush=True
-        )
-
-        response.raise_for_status()
-
-        pdf_bytes = bytearray()
-
         try:
+
+            print(
+                f"[TJAL] Status HTTP: {response.status_code}",
+                flush=True
+            )
+
+            response.raise_for_status()
+
+            pdf_bytes = bytearray()
 
             for chunk in response.iter_content(
                 chunk_size=64 * 1024
@@ -163,7 +165,6 @@ class DjeAlGetData:
                     )
 
         finally:
-
             response.close()
 
         if not pdf_bytes.startswith(b"%PDF-"):
@@ -180,55 +181,6 @@ class DjeAlGetData:
         )
 
         return bytes(pdf_bytes)
-
-    def extract_pdf(
-        self,
-        pdf_bytes: bytes
-    ) -> str:
-
-        print(
-            "[TJAL] Iniciando extração do PDF",
-            flush=True
-        )
-
-        pages_text = []
-
-        with pdfplumber.open(
-            io.BytesIO(pdf_bytes)
-        ) as pdf:
-
-            total_pages = len(pdf.pages)
-
-            print(
-                f"[TJAL] Total de páginas: {total_pages}",
-                flush=True
-            )
-
-            for index, page in enumerate(
-                pdf.pages,
-                start=1
-            ):
-
-                print(
-                    f"[TJAL] Extraindo página "
-                    f"{index}/{total_pages}",
-                    flush=True
-                )
-
-                page_text = page.extract_text()
-
-                if page_text:
-                    pages_text.append(page_text)
-
-        content = "\n".join(pages_text)
-
-        print(
-            f"[TJAL] Extração concluída: "
-            f"{len(content)} caracteres",
-            flush=True
-        )
-
-        return content
 
     def build_diary(self):
 
@@ -251,14 +203,20 @@ class DjeAlGetData:
                     flush=True
                 )
 
-                pdf_bytes = self.download_caderno(
+                # Download do PDF
+                pdf_bytes: bytes = self.download_caderno(
                     dt_diario,
                     caderno
                 )
 
-                content = self.extract_pdf(
-                    pdf_bytes
+                # Extração utilizando classe independente
+                content: str = self.pdf_extractor.extract_full_pages(
+                    pdf_bytes=pdf_bytes,
+                    uf="AL"
                 )
+
+                # Liberação da referência local
+                del pdf_bytes
 
                 diary_data = {
 
